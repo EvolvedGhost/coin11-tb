@@ -4,6 +4,9 @@ import xml.etree.ElementTree as ET
 
 import uiautomator2 as u2
 from utils import check_chars_exist, other_app, get_current_app, select_device, task_loop, check_verify, start_app, TB_APP, check_popup
+from humanize import (human_sleep, human_click, tap_xy, human_long_click,
+                      poll_click, poll_sleep, task_poll_sleep)
+from privilege import print_privilege_report, restore_system_settings
 
 # 2026 版淘金币页面把「体力」改成了「能量」，把「跳一跳拿钱」改成了「升级赛车拿钱/加速升级」，
 # 这里统一用正则同时兼容新旧两套文案，避免活动改版后脚本一直空转。
@@ -20,6 +23,7 @@ time1 = time.time()
 selected_device = select_device()
 d = u2.connect(selected_device)
 print(f"已成功连接设备：{selected_device}")
+print_privilege_report(d)
 
 # 屏幕熄灭时所有控件查找都会“假成功/假失败”，先把屏幕点亮
 # 这里不能让 d.info 抛错把整个脚本打断，所以包一层 try
@@ -27,7 +31,7 @@ try:
     if not d.info.get("screenOn", True):
         print("检测到屏幕已熄灭，正在点亮")
         d.screen_on()
-        time.sleep(1)
+        human_sleep(1)
 except Exception as e:
     print(f"读取屏幕状态失败，跳过亮屏检查: {e}")
 
@@ -46,7 +50,7 @@ ctx.when(xpath="//android.app.Dialog//android.widget.Button[@text='关闭']").cl
 ctx.when(xpath="//android.widget.Image[@text='关闭']").click()
 ctx.when(xpath="//android.widget.FrameLayout[@resource-id='com.taobao.taobao:id/poplayer_native_state_center_layout_frame_id']//android.widget.ImageView[@content-desc='关闭按钮']").click()
 ctx.start()
-time.sleep(3)
+human_sleep(3)
 
 
 def dump_nodes(retry=2):
@@ -58,7 +62,7 @@ def dump_nodes(retry=2):
             root = ET.fromstring(xml)
         except Exception as e:
             print(f"获取界面层级失败: {e}")
-            time.sleep(1)
+            human_sleep(1)
             continue
         nodes = []
         for el in root.iter("node"):
@@ -76,14 +80,14 @@ def dump_nodes(retry=2):
             })
         if nodes:
             return nodes
-        time.sleep(1)
+        human_sleep(1)
     return []
 
 
 def tap_bounds(bounds):
     x = (bounds[0] + bounds[2]) // 2
     y = (bounds[1] + bounds[3]) // 2
-    d.click(x, y)
+    tap_xy(d, x, y)
     return x, y
 
 
@@ -123,7 +127,7 @@ def find_coin_btn(rounds=10):
             print(f"未找到「领淘金币」入口 ({i}/{rounds})，等待页面加载")
         # 秒级轮询，页面一出来就继续，避免停留太久被活动弹窗盖住
         for _ in range(12):
-            time.sleep(0.5)
+            poll_sleep()
             if in_coin_page():
                 print("已进入淘金币页面")
                 return
@@ -152,7 +156,7 @@ def to_task(rounds=6):
             print(f"未找到「赚能量」按钮 ({i}/{rounds})")
         # 点击后 5 秒内轮询面板，一旦出现立即返回
         for _ in range(10):
-            time.sleep(0.5)
+            poll_sleep()
             if in_task_page():
                 print("进入任务页面。。。")
                 return
@@ -164,7 +168,7 @@ def to_task(rounds=6):
                 tap_bounds(close_btn[0].bounds())
             except Exception:
                 pass
-            time.sleep(1)
+            human_sleep(1)
     raise RuntimeError("打不开「做任务赚能量」任务面板：多半被活动弹窗遮挡，请手动关掉弹窗后重试")
 
 
@@ -173,15 +177,16 @@ def check_in_task():
 
 
 def back_to_task():
+    """返回任务页：状态轮询场景，点击不「思考」，间隔 0.3~0.8 秒"""
     print("开始返回任务页面")
     for _ in range(1, 31):
         try:
             temp_package, temp_activity = get_current_app(d)
             if not temp_package or not temp_activity:
-                time.sleep(0.5)
+                poll_sleep()
                 continue
             if "Ext2ContainerActivity" in temp_activity:
-                time.sleep(0.5)
+                poll_sleep()
                 continue
             print(f"{temp_package}--{temp_activity}")
             if TB_APP not in temp_package:
@@ -189,8 +194,8 @@ def back_to_task():
                 start_app(d, TB_APP)
                 jump_btn = d(resourceId="com.taobao.taobao:id/tv_close", text="跳过")
                 if jump_btn.exists:
-                    jump_btn.click()
-                    time.sleep(2)
+                    poll_click(d, jump_btn)
+                    poll_sleep()
                 continue
             check_popup(d)
             if check_in_task():
@@ -208,23 +213,23 @@ def back_to_task():
             close_btn1 = d.xpath("//android.widget.FrameLayout[@resource-id='com.alipay.multiplatform.phone.xriver_integration:id/frameLayout_rightButton1']/android.widget.LinearLayout/android.widget.RelativeLayout/android.widget.RelativeLayout/android.widget.FrameLayout[2]")
             if close_btn1.exists:
                 print("点击关闭小程序按钮")
-                close_btn1.click()
-                time.sleep(1)
+                poll_click(d, close_btn1)
+                poll_sleep()
                 continue
             task_view = d.xpath('//android.widget.TextView[contains(@text, "限时下单任务")]')
             if task_view.exists:
                 close_btn2 = d.xpath('//android.widget.TextView[contains(@text, "限时下单任务")]/preceding-sibling::android.view.View[1]')
                 if close_btn2.exists:
                     print("点击关闭限时下单任务按钮")
-                    close_btn2.click()
-                    time.sleep(1)
+                    poll_click(d, close_btn2)
+                    poll_sleep()
                     continue
             print("点击后退")
             d.press("back")
-            time.sleep(0.5)
+            poll_sleep()
         except Exception as e:
             print(f"返回任务页面出现异常: {e}")
-            time.sleep(1)
+            human_sleep(1)
     print("多次返回仍未回到任务页，重新进入淘金币任务")
     find_coin_btn()
     to_task()
@@ -291,7 +296,7 @@ def reopen_coin_page():
     页面开久了无障碍树偶尔读不到 WebView 里的内容（dump 只剩外壳节点），重开一次通常就恢复了。"""
     print("重新打开淘金币页面")
     d.shell(f"am start -n {TB_APP}/com.taobao.tao.welcome.Welcome")
-    time.sleep(5)
+    human_sleep(5)
     find_coin_btn()
 
 
@@ -303,7 +308,7 @@ MAX_LOOP = 400  # 主循环兜底上限，防止某个「立即领取」按钮�
 while loop_round < MAX_LOOP:
     loop_round += 1
     try:
-        time.sleep(4)
+        task_poll_sleep(4)
         check_verify(d)
         nodes = dump_nodes()
         if not nodes:
@@ -317,7 +322,7 @@ while loop_round < MAX_LOOP:
         if draw_down_btn:
             tap_bounds(draw_down_btn["bounds"])
             print("点击立即领取")
-            time.sleep(2)
+            human_sleep(2)
             continue
 
         print("开始查找按钮。。。")
@@ -325,14 +330,14 @@ while loop_round < MAX_LOOP:
         if get_btn:
             tap_bounds(get_btn["bounds"])
             print("点击领取奖励")
-            time.sleep(2)
+            human_sleep(2)
             continue
 
         de_btn = first_button(nodes, r"点击得")
         if de_btn:
             tap_bounds(de_btn["bounds"])
             print("点击点击得")
-            time.sleep(4)
+            human_sleep(4)
             continue
 
         tasks = collect_task_buttons(nodes)
@@ -349,7 +354,7 @@ while loop_round < MAX_LOOP:
             print("点击按钮", task_name)
             have_clicked[task_name] = have_clicked.get(task_name, 0) + 1
             tap_bounds(btn["bounds"])
-            time.sleep(3.5)
+            human_sleep(3.5)
             task_loop(d, back_to_task, duration=18)
             finish_count = finish_count + 1
             error_count = 0
@@ -371,11 +376,11 @@ close_btn = d(className="android.widget.Button", text="关闭")
 if close_btn.exists:
     try:
         tap_bounds(close_btn[0].bounds())
-        time.sleep(2)
+        human_sleep(2)
     except Exception:
         pass
-d.click(screen_width // 2, 200)
-time.sleep(2)
+tap_xy(d, screen_width // 2, 200)
+human_sleep(2)
 
 print("开始跳一跳/升级赛车")
 last_energy = None   # 上一轮读到的能量，用来判断这一次点击到底有没有生效
@@ -388,7 +393,7 @@ for game_round in range(1, 61):
     # 1) 有弹窗挡着就先点关闭（升级时会弹「解锁新尾翼」，不关掉长按不扣能量）
     if click_close(nodes):
         print(f"[{game_round}] 已关闭弹窗，继续升级")
-        time.sleep(2)
+        human_sleep(2)
         continue
 
     # 2) 正常路径：直接点升级按钮
@@ -434,19 +439,22 @@ for game_round in range(1, 61):
     b = game_btn["bounds"]
     cx, cy = (b[0] + b[2]) // 2, (b[1] + b[3]) // 2
     if phy_num < 50:
-        d.click(cx, cy)
+        tap_xy(d, cx, cy)
     else:
-        d.long_click(cx, cy, 3)
-    time.sleep(7)
+        human_long_click(d, (cx, cy), duration=3)
+    human_sleep(7)
 
     # 点完顺手看一眼有没有弹窗跳出来
     if click_close(dump_nodes()):
         print(f"[{game_round}] 升级后弹窗已关闭")
-        time.sleep(2)
+        human_sleep(2)
 
 ctx.close()
 d.shell("settings put system accelerometer_rotation 0")
 print("关闭手机自动旋转")
+# 跑完把自动旋转恢复，避免用户自己用手机时发现屏幕转不动（也是一种"痕迹"）
+restore_system_settings(d)
+print("已恢复手机自动旋转")
 time2 = time.time()
 minutes, seconds = divmod(int(time2 - time1), 60)
 print(f"共耗时: {minutes} 分钟 {seconds} 秒")
