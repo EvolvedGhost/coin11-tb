@@ -83,12 +83,33 @@ def fish_no_click(text):
 
 
 def get_current_app(d):
-    info = d.shell("dumpsys window | grep mCurrentFocus").output
-    match = re.search(r'mCurrentFocus=Window\{.*? u0 (.*?)/(.*?)\}', info)
+    """获取当前前台应用，返回 (包名, activity)，取不到时返回 (None, None)
+
+    修复点：
+    1. 原来写死 `u0`，手机存在第二个用户（如应用分身 MultiApp user 999）时，
+       落到非 0 用户下的焦点 window 会解析不出来，这里改成 u\\d+；
+    2. 通知栏/锁屏/权限弹窗是 `mCurrentFocus=Window{... u0 NotificationShade}`
+       这类没有 activity 的窗口，原来直接返回 (None, None)，现在兼容；
+    3. mCurrentFocus 取不到时再用 mFocusedApp 兜底。
+    """
+    try:
+        info = d.shell("dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'").output or ""
+    except Exception as e:
+        print(f"获取前台应用失败: {e}")
+        return None, None
+
+    # 例: mCurrentFocus=Window{4b25cc3 u0 com.taobao.taobao/com.taobao.tao.welcome.Welcome}
+    match = re.search(r'mCurrentFocus=Window\{[^}]*?\su\d+\s+([^\s/]+)/([^\s}]+)\}', info)
+    if not match:
+        # 例: mFocusedApp=ActivityRecord{87615303 u0 com.taobao.taobao/com.taobao.tao.TBMainActivity t42939}
+        match = re.search(r'mFocusedApp=ActivityRecord\{[^}]*?\su\d+\s+([^\s/]+)/([^\s}]+)', info)
     if match:
-        package_name = match.group(1)
-        activity_name = match.group(2)
-        return package_name, activity_name
+        return match.group(1), match.group(2)
+
+    # 例: mCurrentFocus=Window{25fe52d u0 NotificationShade}（没有 activity 的窗口）
+    match = re.search(r'mCurrentFocus=Window\{[^}]*?\su\d+\s+([^\s/]+)\}', info)
+    if match:
+        return match.group(1), ""
     return None, None
 
 
@@ -636,88 +657,117 @@ def _detect_and_select_user(d):
         return None
 
 
+def _build_am_start_cmd(package_name, activity=None, user_id=None):
+    """拼装 am start 命令
+
+    修复点：不再用隐式 Intent 启动。
+    部分 ROM（实测 ColorOS / Android 17）上
+        am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.taobao.taobao
+    会直接返回 `Error: Activity not started, unable to resolve Intent ...`（退出码 1），
+    应用根本不会被拉起；换成 -n 包名/activity 的显式启动则稳定成功。
+    """
+    user_arg = f"--user {user_id} " if user_id else ""
+    if activity:
+        return f"am start {user_arg}-n {package_name}/{activity}"
+    return (f"am start {user_arg}-a android.intent.action.MAIN "
+            f"-c android.intent.category.LAUNCHER -p {package_name}")
+
+
 def _am_start_with_user(d, package_name, activity=None, user_id=None):
-    """通过am start命令启动应用，支持--user参数指定用户"""
-    if user_id:
-        if activity:
-            cmd = f"am start --user {user_id} -n {package_name}/{activity}"
-        else:
-            cmd = f"am start --user {user_id} -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {package_name}"
-    else:
-        if activity:
-            cmd = f"am start -n {package_name}/{activity}"
-        else:
-            cmd = f"am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER {package_name}"
+    """通过am start命令启动应用，支持--user参数指定用户
+
+    返回 True 表示命令执行成功（没有出现 Error），False 表示系统明确报错。
+    """
+    cmd = _build_am_start_cmd(package_name, activity=activity, user_id=user_id)
     print(f"执行命令: {cmd}")
-    d.shell(cmd)
+    try:
+        resp = d.shell(cmd)
+    except Exception as e:
+        print(f"执行启动命令出错: {e}")
+        return False
+    output = (resp.output or "").strip()
+    ok = resp.exit_code == 0 and "Error" not in output
+    if not ok:
+        print(f"启动命令失败(exit={resp.exit_code}): {output}")
+    return ok
+
+
+def _wait_for_app(d, package_name, timeout=15.0, interval=0.5):
+    """轮询等待应用来到前台，返回 (是否在前台, 最后看到的前台包名)
+
+    原来固定 sleep 2 秒后只判断一次，冷启动/开屏广告稍慢就会误判成"未成功启动"。
+    """
+    deadline = time.time() + timeout
+    current = None
+    while time.time() < deadline:
+        current, _ = get_current_app(d)
+        if current == package_name:
+            return True, current
+        time.sleep(interval)
+    return False, current
 
 
 def start_app(d, package_name, init=False):
     """根据包名启动应用，支持特定应用的activity配置
     init参数控制启动模式：
-    - True: 初始化启动，使用stop=True, use_monkey=True
-    - False: 普通启动，使用stop=False, use_monkey=False
+    - True: 初始化启动，先 force-stop 再冷启动
+    - False: 普通启动，不清后台
     首次调用时会检测手机多用户并询问选择，后续自动使用已选用户
-    启动后验证是否成功"""
-    user_id = _detect_and_select_user(d)
-    stop = init
-    use_monkey = init
+    启动后验证是否成功，返回 True/False
 
-    # 获取配置的activity
+    修复点：
+    1. 优先用配置的 activity 做显式启动（隐式 am start 在部分 ROM 上必然失败）；
+    2. 启动后用轮询确认真的到了前台，而不是固定 sleep 2 秒判定；
+    3. 失败时不再按返回键 —— 原来失败就 d.press("back")，而这时前台往往还是
+       上一个应用（比如支付宝），按返回会把人家一路退回桌面，表现为"脚本跑着
+       跑着回到主界面了"。
+    """
+    user_id = _detect_and_select_user(d)
     activity = APP_START_CONFIG.get(package_name)
+
+    if init:
+        print(f"强制停止应用: {package_name}")
+        user_arg = f"--user {user_id} " if user_id else ""
+        try:
+            d.shell(f"am force-stop {user_arg}{package_name}")
+        except Exception as e:
+            print(f"force-stop 失败: {e}")
+        time.sleep(1)
+
+    # 1. 有配置 activity 时优先显式启动
+    if activity:
+        print(f"启动应用: {package_name}/{activity}, 显式启动, user: {user_id or '默认'}")
+        _am_start_with_user(d, package_name, activity=activity, user_id=user_id)
+        started, current = _wait_for_app(d, package_name)
+        if started:
+            print(f"应用 {package_name} 启动成功")
+            return True
+        print(f"应用 {package_name} 未成功启动，当前应用: {current}")
+
+    # 2. 没有配置 activity，或显式启动没成功时，保持原来的启动方式
     try_count = 3
     try:
-        # 优先不使用activity启动
         while try_count > 0:
-            print(f"启动应用: {package_name}, stop: {stop}, use_monkey: {use_monkey}, 不使用activity, user: {user_id or '默认'}")
-            if stop:
-                d.shell(f"am force-stop {package_name}")
+            print(f"启动应用: {package_name}, 不使用activity, user: {user_id or '默认'}")
+            if init and user_id:
+                d.shell(f"am force-stop --user {user_id} {package_name}")
                 time.sleep(1)
             if user_id:
                 _am_start_with_user(d, package_name, user_id=user_id)
-            elif use_monkey:
+            else:
+                # 单用户时沿用 u2 自身的 monkey 启动，行为与改动前一致
                 d.app_start(package_name, stop=False, use_monkey=True)
-            else:
-                d.app_start(package_name, stop=False, use_monkey=False)
-            time.sleep(5 if stop else 2)
-            cancel_btn = d(className="android.widget.FrameLayout", resourceId="com.taobao.taobao:id/uik_fl_textview_container_2")
-            if cancel_btn.exists:
-                cancel_btn.click()
-                time.sleep(2)
-            # 验证应用是否启动成功
-            current_package, _ = get_current_app(d)
-            if current_package == package_name:
+            started, current = _wait_for_app(d, package_name, timeout=8.0)
+            if started:
                 print(f"应用 {package_name} 启动成功")
-                return
-            else:
-                print(f"应用 {package_name} 未成功启动，当前应用: {current_package}，尝试后退")
-                d.press("back")
-                time.sleep(1)
+                return True
+            print(f"应用 {package_name} 未成功启动，当前应用: {current}")
             try_count -= 1
     except Exception as e:
         print(f"不使用activity启动失败: {e}")
 
-    # 如果失败且有配置activity，则尝试使用activity启动
-    if activity:
-        try:
-            print(f"使用activity启动应用: {package_name}, activity: {activity}, stop: {stop}, user: {user_id or '默认'}")
-            if stop:
-                d.shell(f"am force-stop {package_name}")
-                time.sleep(1)
-            if user_id:
-                _am_start_with_user(d, package_name, activity=activity, user_id=user_id)
-            else:
-                d.app_start(package_name=package_name, activity=activity, stop=False)
-            time.sleep(2)
-            # 验证应用是否启动成功
-            current_package, _ = get_current_app(d)
-            if current_package == package_name:
-                print(f"应用 {package_name} 启动成功")
-                return
-            else:
-                print(f"应用 {package_name} 未成功启动，当前应用: {current_package}")
-        except Exception as e:
-            print(f"使用activity启动也失败: {e}")
+    print(f"应用 {package_name} 启动失败，请检查是否安装在该用户下")
+    return False
 
 
 def check_verify(d):
