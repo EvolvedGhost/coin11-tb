@@ -3,10 +3,14 @@ import time
 
 import uiautomator2 as u2
 from utils import check_chars_exist, get_current_app, select_device, task_loop, check_verify, start_app, TB_APP, print_error
+from humanize import (human_sleep, human_click, tap_xy, human_long_click,
+                      poll_click, poll_sleep, task_poll_sleep)
+from privilege import print_privilege_report
 
 selected_device = select_device()
 d = u2.connect(selected_device)
 print(f"已成功连接设备：{selected_device}")
+print_privilege_report(d)
 start_app(d, TB_APP, init=True)
 screen_width, screen_height = d.window_size()
 ctx = d.watch_context()
@@ -22,7 +26,7 @@ ctx.when(xpath="//android.app.Dialog//android.widget.Button[@text='关闭']").cl
 ctx.when(xpath="//android.widget.Image[@text='关闭']").click()
 ctx.when(xpath="//android.widget.FrameLayout[@resource-id='com.taobao.taobao:id/poplayer_native_state_center_layout_frame_id']//android.widget.ImageView[@content-desc='关闭按钮']").click()
 ctx.start()
-time.sleep(3)
+human_sleep(3)
 has_clicked = dict()
 
 
@@ -41,8 +45,8 @@ def find_coin_btn():
             break
         coin_btn = d(className="android.widget.FrameLayout", description="领淘金币")
         if coin_btn.exists:
-            coin_btn.click()
-        time.sleep(3)
+            human_click(d, coin_btn)
+        human_sleep(3)
 
 
 def to_task():
@@ -53,22 +57,24 @@ def to_task():
                 break
             close_btn1 = d(className="android.widget.Button", text="关闭")
             if close_btn1.exists:
-                close_btn1.click()
-                time.sleep(2)
+                human_click(d, close_btn1)
+                human_sleep(2)
                 continue
             task_btn1 = d(className="android.widget.Button", text="赚能量")
             if task_btn1.exists:
-                task_btn1.click()
+                human_click(d, task_btn1)
             else:
                 canvas_image = d.xpath('//android.webkit.WebView[@text="淘金币首页"]/android.view.View/android.view.View[1]/android.widget.Image')
                 if canvas_image.exists:
-                    d.click(canvas_image.bounds[2] - 100, canvas_image.bounds[3] - 150)
-            time.sleep(3)
+                    tap_xy(d, canvas_image.bounds[2] - 100, canvas_image.bounds[3] - 150)
+            human_sleep(3)
         except Exception as e:
             print_error()
 
 
 def back_to_task():
+    """返回任务页：这里是状态轮询场景，点击不「思考」，间隔 0.3~0.8 秒，
+    既保证效率，又不至于像机器一样每 0.5 秒精确触发一次。"""
     print("开始返回任务页面")
     while True:
         try:
@@ -77,36 +83,36 @@ def back_to_task():
                 break
             temp_package, temp_activity = get_current_app(d)
             if not temp_package or not temp_activity:
-                time.sleep(0.5)
+                poll_sleep()
                 continue
             if "Ext2ContainerActivity" in temp_activity:
-                time.sleep(0.5)
+                poll_sleep()
                 continue
             if TB_APP not in temp_package:
                 print(f"回到原始APP,{TB_APP}")
                 start_app(d, TB_APP)
                 jump_btn = d(resourceId="com.taobao.taobao:id/tv_close", text="跳过")
                 if jump_btn.exists:
-                    jump_btn.click()
-                    time.sleep(2)
+                    poll_click(d, jump_btn)
+                    poll_sleep()
                 continue
             else:
                 close_btn1 = d.xpath("//android.widget.FrameLayout[@resource-id='com.alipay.multiplatform.phone.xriver_integration:id/frameLayout_rightButton1']/android.widget.LinearLayout/android.widget.RelativeLayout/android.widget.RelativeLayout/android.widget.FrameLayout[2]")
                 if close_btn1.exists:
                     print("点击关闭小程序按钮")
-                    close_btn1.click()
-                    time.sleep(1)
+                    poll_click(d, close_btn1)
+                    poll_sleep()
                     continue
                 task_view = d.xpath('//android.widget.TextView[contains(@text, "限时下单任务")]')
                 if task_view.exists:
                     close_btn2 = d.xpath('//android.widget.TextView[contains(@text, "限时下单任务")]/preceding-sibling::android.view.View[1]')
                     if close_btn2.exists:
                         print("点击关闭限时下单任务按钮")
-                        close_btn2.click()
-                        time.sleep(1)
+                        poll_click(d, close_btn2)
+                        poll_sleep()
                         continue
                 d.press('back')
-            time.sleep(0.4)
+            poll_sleep()
         except Exception as e:
             start_app(d, TB_APP)
 
@@ -117,12 +123,12 @@ finish_count = 0
 
 while True:
     try:
-        time.sleep(4)
+        task_poll_sleep(4)
         print("开始查找任务。。。")
         get_btn = d(className="android.widget.Button", textMatches=r".*立即领取，奖励\d+.*")
         if get_btn.exists:
             print("点击立即领取")
-            get_btn.click()
+            human_click(d, get_btn)
             continue
         has_task = False
         task_btn = d.xpath('//android.widget.Button[@text="去完成"]')
@@ -147,8 +153,8 @@ while True:
             if task_name:
                 print(f"进行任务：{task_name}，需要浏览{do_time}秒。")
                 has_clicked[task_name] = has_clicked[task_name] + 1 if has_clicked.get(task_name) else 1
-                (task_btn.all())[click_index].click()
-                time.sleep(5)
+                human_click(d, task_btn.all()[click_index])
+                human_sleep(5)
                 has_task = True
                 task_loop(d, back_to_task, duration=do_time)
                 finish_count += 1
@@ -161,20 +167,20 @@ while True:
     except Exception as e:
         print_error()
 print(f"共完成{finish_count}个任务")
-d.click(screen_width // 2, 150)
-time.sleep(3)
+tap_xy(d, screen_width // 2, 150)
+human_sleep(3)
 print("开始升级赛车")
 while True:
-    time.sleep(4)
+    task_poll_sleep(4)
     close_btn = d(className="android.widget.Button", text="关闭")
     if close_btn.exists:
         print("点击关闭")
-        close_btn.click()
-        time.sleep(2)
+        human_click(d, close_btn)
+        human_sleep(2)
     choice_btn = d(className="android.widget.TextView", text="确认选择")
     if choice_btn.exists:
         print("点击确认选择")
-        choice_btn.click()
+        human_click(d, choice_btn)
         continue
     racing_btn = d(className="android.widget.Button", textContains="升级赛车拿钱")
     if racing_btn.exists:
@@ -184,6 +190,6 @@ while True:
             if energy_text < 100:
                 break
             elif energy_text < 500:
-                racing_btn.click()
+                human_click(d, racing_btn)
             else:
-                racing_btn.long_click(duration=3)
+                human_long_click(d, racing_btn, duration=3)
